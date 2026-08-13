@@ -19,15 +19,35 @@
 
 ---
 
+> **Fork note (multi-provider):** this branch extends the original Claude-only
+> extension to also show **OpenAI Codex** usage, so the top bar measures both
+> assistants at once from a single codebase. Each provider is an independent,
+> toggleable segment.
+
 ## Features
 
-- **5-hour window** — short-term rate limit utilization
-- **7-day window** — weekly rolling limit utilization
-- **Reset countdown** — time remaining until your 5-hour quota resets
+- **Two providers at once** — Claude (Anthropic) and Codex (OpenAI/ChatGPT) side by side
+- **Short + long windows** — per-provider short-term and rolling-window utilization
+- **Reset countdown** — time remaining until the nearest quota resets
 - **Color-coded labels** — white (normal) / yellow (>60%) / orange (>80%) / red (>90%)
-- **Dropdown details** — Sonnet usage, exact reset time, quick link to claude.ai
-- **Auto-detect credentials** — reads your OAuth token from Claude Code automatically
-- **Configurable** — refresh interval, panel position, manual token override
+- **Dropdown details** — exact windows, reset time, plan type, quick links
+- **Zero-cost Codex reads** — no OpenAI quota spent (see how it works below)
+- **Auto-detect credentials** — reads the Claude OAuth token from Claude Code automatically
+- **Configurable** — refresh interval, panel position, per-provider toggles, manual token override
+
+## How each provider gets its numbers
+
+| | Claude | Codex |
+|---|---|---|
+| **Source** | `GET api.anthropic.com/api/oauth/usage` (live pull) | newest `~/.codex/sessions/**/rollout-*.jsonl` → last `payload.rate_limits` |
+| **Auth** | Claude Code OAuth token (`~/.claude/.credentials.json`) or manual | none needed |
+| **Freshness** | live | as fresh as your last Codex turn (staleness shown when > 5 min old) |
+| **Quota cost** | none | none |
+
+Anthropic offers a dedicated usage endpoint; OpenAI does not, so the Codex
+segment reads the rate-limit snapshot that Codex itself records into each
+session rollout. Parsing runs in a short-lived `python3` subprocess so the
+GNOME Shell main loop is never blocked.
 
 ## Installation
 

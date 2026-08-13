@@ -1,9 +1,9 @@
 {
-  "name": "Claude Usage",
-  "description": "Monitor your Claude AI usage limits in the GNOME top bar. Shows 5-hour and 7-day usage percentages and time until quota resets.",
+  "name": "AI Usage (Claude + Codex)",
+  "description": "Monitor your Claude AI and OpenAI Codex usage limits in the GNOME top bar. Claude percentages come from the Anthropic OAuth usage endpoint; Codex percentages are read from the newest local Codex rollout rate_limits snapshot. Shows short/long window usage and time until quota resets, for both at once.",
   "uuid": "claude-usage@tasta.space",
   "settings-schema": "org.gnome.shell.extensions.claude-usage",
   "shell-version": ["45", "46", "47", "48", "49"],
   "url": "https://github.com/stfnRO/gnome-shell-extension-claude-usage",
-  "version": 2
+  "version": 3
 }

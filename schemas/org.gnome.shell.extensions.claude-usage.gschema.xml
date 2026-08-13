@@ -12,13 +12,25 @@
     <key name="refresh-interval" type="i">
       <default>180</default>
       <summary>Refresh interval in seconds</summary>
-      <description>How often to fetch updated usage data from claude.ai</description>
+      <description>How often to fetch updated usage data</description>
     </key>
 
     <key name="position-in-panel" type="s">
       <default>'right'</default>
       <summary>Position in panel</summary>
       <description>Where to place the indicator: left, center, or right</description>
+    </key>
+
+    <key name="enable-claude" type="b">
+      <default>true</default>
+      <summary>Show Claude usage</summary>
+      <description>Show the Claude (Anthropic) usage segment, fetched from api.anthropic.com/api/oauth/usage.</description>
+    </key>
+
+    <key name="enable-codex" type="b">
+      <default>true</default>
+      <summary>Show Codex usage</summary>
+      <description>Show the Codex (OpenAI/ChatGPT) usage segment, read from the newest ~/.codex/sessions rollout rate_limits snapshot.</description>
     </key>
 
   </schema>

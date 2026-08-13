@@ -2,6 +2,28 @@
     spacing: 6px;
 }
 
+.aiu-panel {
+    spacing: 4px;
+}
+
+.aiu-segment {
+    spacing: 4px;
+}
+
+.aiu-icon {
+    padding-right: 1px;
+}
+
+.aiu-divider {
+    font-size: 11px;
+    padding: 0 4px;
+    color: rgba(255, 255, 255, 0.35);
+}
+
+.aiu-menu-header {
+    font-weight: bold;
+}
+
 .claude-usage-icon {
     icon-size: 16px;
     padding-right: 2px;
@@ -10,6 +32,7 @@
 .claude-usage-label {
     font-weight: bold;
     font-size: 11px;
+    color: rgba(255, 255, 255, 0.9);
 }
 
 .claude-usage-separator {
@@ -20,11 +43,6 @@
 
 .claude-usage-reset {
     color: rgba(255, 255, 255, 0.7);
-}
-
-/* Per-label color states based on individual percentage */
-.claude-usage-label {
-    color: rgba(255, 255, 255, 0.9);
 }
 
 .claude-usage-label-warning {
