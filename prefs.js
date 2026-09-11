@@ -55,7 +55,7 @@ export default class AIUsagePreferences extends ExtensionPreferences {
         // Codex
         let codexGroup = new Adw.PreferencesGroup({
             title: 'Codex (OpenAI / ChatGPT)',
-            description: 'OpenAI exposes no live usage endpoint, so this reads the rate_limits snapshot from your newest ~/.codex/sessions rollout. It costs no quota and needs no token, but is only as fresh as your last Codex turn (staleness is shown when > 5 min old).',
+            description: 'Usage is read live from the local Codex App Server. This includes every named model limit and earned full-reset credit, costs no quota, and needs no API key. Older Codex clients fall back to a local rollout snapshot.',
         });
         provPage.add(codexGroup);
 
@@ -67,10 +67,10 @@ export default class AIUsagePreferences extends ExtensionPreferences {
 
         let codexStatus = this._checkCodex();
         let codexStatusRow = new Adw.ActionRow({
-            title: 'Rollout auto-detect',
+            title: 'Codex auto-detect',
             subtitle: codexStatus.found
-                ? `Found ${codexStatus.count} rollout file(s) under ~/.codex/sessions`
-                : 'No ~/.codex/sessions rollouts found — run Codex at least once',
+                ? `Found Codex at ${codexStatus.path}`
+                : 'Codex was not found in PATH or a standard install location',
         });
         codexStatusRow.add_suffix(new Gtk.Image({
             icon_name: codexStatus.found ? 'emblem-ok-symbolic' : 'dialog-warning-symbolic',
@@ -135,36 +135,16 @@ export default class AIUsagePreferences extends ExtensionPreferences {
     }
 
     _checkCodex() {
-        try {
-            let base = GLib.build_filenamev([GLib.get_home_dir(), '.codex', 'sessions']);
-            let count = this._countRollouts(Gio.File.new_for_path(base), 0);
-            return { found: count > 0, count };
-        } catch (e) {
-            return { found: false, count: 0 };
+        let candidates = [
+            GLib.find_program_in_path('codex'),
+            GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'codex']),
+            '/usr/local/bin/codex',
+            '/usr/bin/codex',
+        ];
+        for (let path of candidates) {
+            if (path && GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE))
+                return { found: true, path };
         }
-    }
-
-    // Shallow recursive count of rollout-*.jsonl (depth-limited to year/month/day).
-    _countRollouts(dir, depth) {
-        let total = 0;
-        let en;
-        try {
-            en = dir.enumerate_children('standard::name,standard::type',
-                Gio.FileQueryInfoFlags.NONE, null);
-        } catch (e) {
-            return 0;
-        }
-        let info;
-        while ((info = en.next_file(null)) !== null) {
-            let name = info.get_name();
-            if (info.get_file_type() === Gio.FileType.DIRECTORY && depth < 3) {
-                total += this._countRollouts(dir.get_child(name), depth + 1);
-            } else if (name.startsWith('rollout-') && name.endsWith('.jsonl')) {
-                total += 1;
-            }
-            if (total > 999) break;
-        }
-        en.close(null);
-        return total;
+        return { found: false };
     }
 }

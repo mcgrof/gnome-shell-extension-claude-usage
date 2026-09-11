@@ -30,7 +30,7 @@
     <key name="enable-codex" type="b">
       <default>true</default>
       <summary>Show Codex usage</summary>
-      <description>Show the Codex (OpenAI/ChatGPT) usage segment, read from the newest ~/.codex/sessions rollout rate_limits snapshot.</description>
+      <description>Show live Codex usage from Codex App Server, with a local rollout snapshot as a legacy fallback.</description>
     </key>
 
   </schema>

@@ -24,6 +24,19 @@
     font-weight: bold;
 }
 
+.aiu-menu-subheader {
+    font-weight: bold;
+    padding-top: 4px;
+}
+
+.aiu-menu-muted {
+    color: rgba(255, 255, 255, 0.65);
+}
+
+.aiu-menu-stale {
+    color: #f5c542;
+}
+
 .claude-usage-icon {
     icon-size: 16px;
     padding-right: 2px;

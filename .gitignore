@@ -11,6 +11,8 @@ CLAUDE.local.md
 
 # Compiled schemas (generated)
 schemas/gschemas.compiled
+__pycache__/
+*.py[cod]
 
 # OS files
 .DS_Store

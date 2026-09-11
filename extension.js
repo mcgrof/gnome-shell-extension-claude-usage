@@ -14,22 +14,15 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 const USAGE_API = 'https://api.anthropic.com/api/oauth/usage';
 const CLAUDE_CREDS = GLib.build_filenamev([GLib.get_home_dir(), '.claude', '.credentials.json']);
 
-// Threshold (ms) beyond which a segment's data is flagged as stale in the UI.
-const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+// Rollout fallback data can only understate usage. Match waybar-ai-usage and
+// call it stale after six hours; live App Server readings always have age 0.
+const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 
 let aiUsageMenu;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// Compact label for a rate-limit window given its length in minutes.
-function windowLabel(minutes) {
-    if (!minutes || minutes <= 0) return '';
-    if (minutes % 1440 === 0) return `${minutes / 1440}d`;
-    if (minutes % 60 === 0) return `${minutes / 60}h`;
-    return `${minutes}m`;
-}
 
 function formatDuration(ms) {
     let totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -59,6 +52,8 @@ class ClaudeProvider {
         this.icon = 'claude-symbolic.svg';
         this._extPath = extPath;
         this._settings = settings;
+        this._lastGood = null;
+        this._blockedUntil = 0;
     }
 
     _token() {
@@ -79,6 +74,13 @@ class ClaudeProvider {
     }
 
     fetch(soupSession, callback) {
+        if (Date.now() < this._blockedUntil) {
+            callback(this._lastGood
+                ? { ...this._lastGood, cached: true }
+                : { ok: false, error: 'Rate limited' });
+            return;
+        }
+
         let token = this._token();
         if (!token) {
             callback({ ok: false, error: 'No token' });
@@ -100,18 +102,33 @@ class ClaudeProvider {
                         let parsed = parseInt(hdr, 10);
                         if (!isNaN(parsed) && parsed > 0) retry = Math.min(parsed, 600);
                     }
-                    callback({ ok: false, error: 'Rate limited', rateLimited: true, retryAfter: retry });
+                    this._blockedUntil = Date.now() + retry * 1000;
+                    callback(this._lastGood
+                        ? { ...this._lastGood, cached: true }
+                        : { ok: false, error: 'Rate limited' });
+                    return;
+                }
+                if (status === 401 || status === 403) {
+                    callback(this._lastGood
+                        ? { ...this._lastGood, cached: true }
+                        : { ok: false, error: 'Auth — re-login to Claude Code' });
                     return;
                 }
                 if (status !== 200) {
-                    callback({ ok: false, error: `HTTP ${status}` });
+                    callback(this._lastGood
+                        ? { ...this._lastGood, cached: true }
+                        : { ok: false, error: `HTTP ${status}` });
                     return;
                 }
                 let data = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                callback(this._normalize(data));
+                this._lastGood = this._normalize(data);
+                this._blockedUntil = 0;
+                callback(this._lastGood);
             } catch (e) {
                 logError(e, '[AI Usage] Claude fetch');
-                callback({ ok: false, error: 'Error' });
+                callback(this._lastGood
+                    ? { ...this._lastGood, cached: true }
+                    : { ok: false, error: 'Offline' });
             }
         });
     }
@@ -122,10 +139,12 @@ class ClaudeProvider {
             : null;
         let short = mk(data.five_hour, '5h');
         let long = mk(data.seven_day, '7d');
-        let extra = null;
+        let extras = [];
         if (data.seven_day_sonnet?.utilization != null)
-            extra = `Sonnet 7d: ${Math.round(data.seven_day_sonnet.utilization)}%`;
-        return { ok: true, short, long, extra, staleMs: 0 };
+            extras.push(`Sonnet 7d: ${Math.round(data.seven_day_sonnet.utilization)}%`);
+        if (data.seven_day_opus?.utilization != null)
+            extras.push(`Opus 7d: ${Math.round(data.seven_day_opus.utilization)}%`);
+        return { ok: true, short, long, extras, staleMs: 0 };
     }
 }
 
@@ -136,85 +155,49 @@ class CodexProvider {
         this.icon = 'openai-symbolic.svg';
         this._extPath = extPath;
         this._settings = settings;
+        this._lastGood = null;
     }
 
-    // Reads the newest ~/.codex/sessions rollout that carries a rate_limits
-    // snapshot. Runs in a subprocess so parsing (potentially large) rollout
-    // files never blocks the Shell main loop. Emits one JSON line: {ts, rl}.
+    // Query Codex App Server asynchronously so the Shell main loop never
+    // blocks. The helper retains canonical local rollout parsing as a legacy
+    // fallback and returns the same normalized structure as ClaudeProvider.
     fetch(soupSession, callback) {
-        const PY = [
-            'import glob, os, json',
-            "d = os.path.expanduser('~/.codex/sessions')",
-            "files = sorted(glob.glob(d + '/*/*/*/rollout-*.jsonl'), key=os.path.getmtime, reverse=True)",
-            'for f in files[:8]:',
-            '    last = None',
-            '    try:',
-            '        with open(f) as fh:',
-            '            for line in fh:',
-            '                if \'"rate_limits"\' in line:',
-            '                    last = line',
-            '    except Exception:',
-            '        continue',
-            '    if last:',
-            '        try:',
-            '            o = json.loads(last)',
-            "            rl = (o.get('payload') or {}).get('rate_limits')",
-            "            ts = o.get('timestamp')",
-            '            if rl:',
-            "                print(json.dumps({'ts': ts, 'rl': rl}))",
-            '                break',
-            '        except Exception:',
-            '            continue',
-        ].join('\n');
-
+        let helper = GLib.build_filenamev([this._extPath, 'codex-usage-helper.py']);
         let proc;
         try {
             proc = Gio.Subprocess.new(
-                ['python3', '-c', PY],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE
+                ['python3', helper],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
             );
         } catch (e) {
-            callback({ ok: false, error: 'python3?' });
+            callback(this._lastGood
+                ? { ...this._lastGood, cached: true }
+                : { ok: false, error: 'Cannot start Codex helper' });
             return;
         }
 
         proc.communicate_utf8_async(null, null, (p, res) => {
             try {
-                let [, stdout] = p.communicate_utf8_finish(res);
+                let [, stdout, stderr] = p.communicate_utf8_finish(res);
                 if (!stdout || !stdout.trim()) {
-                    callback({ ok: false, error: 'No data' });
+                    throw new Error(stderr?.trim() || 'No helper output');
+                }
+                let normalized = JSON.parse(stdout.trim().split('\n').pop());
+                if (normalized.ok) {
+                    this._lastGood = normalized;
+                    callback(normalized);
                     return;
                 }
-                let payload = JSON.parse(stdout.trim().split('\n').pop());
-                callback(this._normalize(payload));
+                callback(this._lastGood
+                    ? { ...this._lastGood, cached: true }
+                    : normalized);
             } catch (e) {
                 logError(e, '[AI Usage] Codex parse');
-                callback({ ok: false, error: 'Error' });
+                callback(this._lastGood
+                    ? { ...this._lastGood, cached: true }
+                    : { ok: false, error: 'Codex helper error' });
             }
         });
-    }
-
-    _normalize(payload) {
-        let rl = payload.rl || {};
-        let mk = (w) => (w && w.used_percent != null)
-            ? { pct: w.used_percent, resetMs: w.resets_at ? w.resets_at * 1000 : 0, min: w.window_minutes || 0 }
-            : null;
-        let windows = [mk(rl.primary), mk(rl.secondary)].filter(Boolean);
-
-        let short = null, long = null;
-        if (windows.length === 2) {
-            windows.sort((a, b) => a.min - b.min);
-            short = windows[0];
-            long = windows[1];
-        } else if (windows.length === 1) {
-            long = windows[0];
-        }
-        if (short) short.label = windowLabel(short.min);
-        if (long) long.label = windowLabel(long.min);
-
-        let extra = rl.plan_type ? `Plan: ${rl.plan_type}` : null;
-        let staleMs = payload.ts ? Math.max(0, Date.now() - Date.parse(payload.ts)) : 0;
-        return { ok: true, short, long, extra, staleMs };
     }
 }
 
@@ -258,10 +241,8 @@ class UsageSegment {
         this.menuHeader.label.add_style_class_name('aiu-menu-header');
         menu.addMenuItem(this.menuHeader);
 
-        this.menuShort = this._mkMenuItem(menu);
-        this.menuLong = this._mkMenuItem(menu);
-        this.menuExtra = this._mkMenuItem(menu);
-        this.menuReset = this._mkMenuItem(menu);
+        this.menuSection = new PopupMenu.PopupMenuSection();
+        menu.addMenuItem(this.menuSection);
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
     }
 
@@ -284,12 +265,57 @@ class UsageSegment {
         });
     }
 
-    _mkMenuItem(menu) {
-        let item = new PopupMenu.PopupMenuItem('');
+    _addMenuItem(text, styleClass = null) {
+        let item = new PopupMenu.PopupMenuItem(text);
         item.setSensitive(false);
-        item.actor.hide();
-        menu.addMenuItem(item);
+        if (styleClass)
+            item.label.add_style_class_name(styleClass);
+        this.menuSection.addMenuItem(item);
         return item;
+    }
+
+    _windowLine(win, indent = '') {
+        if (!win) return null;
+        let pct = Math.round(win.pct);
+        let text = `${indent}${win.label || 'window'}: ${pct}% used · ${Math.max(0, 100 - pct)}% left`;
+        if (win.resetMs)
+            text += ` · resets in ${formatDuration(win.resetMs - Date.now())}`;
+        return text;
+    }
+
+    _renderMenu(norm) {
+        this.menuSection.removeAll();
+        if (!norm?.ok) {
+            this._addMenuItem(norm?.error || 'Error', 'aiu-menu-muted');
+            return;
+        }
+
+        if (norm.short) this._addMenuItem(this._windowLine(norm.short));
+        if (norm.long) this._addMenuItem(this._windowLine(norm.long));
+        for (let extra of norm.extras || [])
+            this._addMenuItem(extra);
+
+        if ((norm.otherLimits || []).length > 0) {
+            this._addMenuItem('Other model limits', 'aiu-menu-subheader');
+            for (let limit of norm.otherLimits) {
+                this._addMenuItem(limit.name || 'Unnamed limit', 'aiu-menu-muted');
+                for (let win of limit.windows || [])
+                    this._addMenuItem(this._windowLine(win, '  '));
+            }
+        }
+
+        if (norm.resetCredits != null) {
+            this._addMenuItem(`Available full resets: ${norm.resetCredits}`, 'aiu-menu-subheader');
+            for (let expiry of norm.resetExpiries || [])
+                this._addMenuItem(`  expires in ${formatDuration(expiry - Date.now())}`);
+        }
+
+        if (norm.liveSource)
+            this._addMenuItem(`Source: ${norm.liveSource} (live)`, 'aiu-menu-muted');
+        if (norm.staleMs > STALE_THRESHOLD_MS)
+            this._addMenuItem(`Stale fallback data: ${formatDuration(norm.staleMs)} old`, 'aiu-menu-stale');
+        if (norm.cached)
+            this._addMenuItem('Cached — last refresh failed', 'aiu-menu-stale');
     }
 
     _setWindow(label, sep, win) {
@@ -315,6 +341,8 @@ class UsageSegment {
     }
 
     update(norm) {
+        if (this._destroyed) return;
+        this._renderMenu(norm);
         if (!norm || !norm.ok) {
             this.shortLabel.hide();
             this._sep1.hide();
@@ -325,50 +353,31 @@ class UsageSegment {
             this.resetLabel.set_text(norm?.error || 'error');
             this.resetLabel.show();
 
-            this.menuShort.actor.hide();
-            this.menuExtra.actor.hide();
-            this.menuReset.actor.hide();
-            this.menuLong.label.set_text(`${this.provider.name}: ${norm?.error || 'error'}`);
-            this.menuLong.actor.show();
             return;
         }
 
         let hasShort = this._setWindow(this.shortLabel, this._sep1, norm.short);
         let hasLong = this._setWindow(this.longLabel, this._sep2, norm.long);
-        if (!hasLong) this._sep1.hide();
+        if (hasShort && hasLong) this._sep1.show();
+        else this._sep1.hide();
+        if (hasShort || hasLong) this._sep2.show();
+        else this._sep2.hide();
 
         // Reset timer: prefer the shorter window's reset, else the longer's.
         let resetMs = (norm.short && norm.short.resetMs) || (norm.long && norm.long.resetMs) || 0;
-        let staleTag = norm.staleMs > STALE_THRESHOLD_MS ? ` (${formatDuration(norm.staleMs)} old)` : '';
+        let staleTag = norm.staleMs > STALE_THRESHOLD_MS ? ' ?' : '';
+        let credits = norm.resetCredits != null ? ` · ↻${norm.resetCredits}` : '';
         if (resetMs) {
             let remaining = Math.max(0, resetMs - Date.now());
-            this.resetLabel.set_text(`↻ ${formatDuration(remaining)}${staleTag}`);
+            this.resetLabel.set_text(`↻ ${formatDuration(remaining)}${credits}${staleTag}`);
         } else {
-            this.resetLabel.set_text(`↻ --${staleTag}`);
+            this.resetLabel.set_text(`↻ --${credits}${staleTag}`);
         }
         this.resetLabel.show();
-
-        // Menu detail lines.
-        let setItem = (item, text) => {
-            if (text) { item.label.set_text(text); item.actor.show(); }
-            else item.actor.hide();
-        };
-        setItem(this.menuShort, norm.short ? `${norm.short.label} window: ${Math.round(norm.short.pct)}% used` : null);
-        setItem(this.menuLong, norm.long ? `${norm.long.label} window: ${Math.round(norm.long.pct)}% used` : null);
-        setItem(this.menuExtra, norm.extra);
-        let resetLine = null;
-        if (resetMs) {
-            let d = new Date(resetMs);
-            let hh = d.getHours().toString().padStart(2, '0');
-            let mm = d.getMinutes().toString().padStart(2, '0');
-            resetLine = `Resets ${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
-        }
-        if (norm.staleMs > STALE_THRESHOLD_MS)
-            resetLine = (resetLine ? resetLine + ' · ' : '') + `data ${formatDuration(norm.staleMs)} old`;
-        setItem(this.menuReset, resetLine);
     }
 
     destroy() {
+        this._destroyed = true;
         this.box.destroy();
     }
 }
